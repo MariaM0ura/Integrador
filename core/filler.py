@@ -23,6 +23,7 @@ ARQUITETURA:
 from __future__ import annotations
 
 import copy
+import io
 import logging
 import re
 import tempfile
@@ -54,6 +55,8 @@ MARKETPLACE_CONFIG: dict[str, dict] = {
     },
     "Shopee": {
         "sheet": "Modelo",
+        "sheet_candidates": ["Modelo", "MODELO", "Modelo de produto", "Product template"],
+        # Muitos templates PT têm metadados nas linhas 1–2; cabeçalhos reais podem ser 2–5.
         "header_row": 3,
         "data_start": 7,
     },
@@ -77,11 +80,6 @@ MARKETPLACE_CONFIG: dict[str, dict] = {
             "largura_pacote":     ("cm", "m"),
             "comprimento_pacote": ("cm", "m"),
         },
-      "Walmart": {
-        "sheet": "Product Content And Site Exp",
-        "header_row": 4,
-        "data_start": 7,
-      },
     },
     "Walmart": {
         "sheet": "Product Content And Site Exp",
@@ -157,6 +155,115 @@ def _strip_accents(text: str) -> str:
 
 def _normalize_col(text) -> str:
     return _strip_accents(str(text).strip().lower())
+
+
+def guess_best_header_row(ws, default_row: int, *, min_cols: int = 5, scan_to: int = 15) -> int:
+    """
+    Alguns templates (ex.: Shopee) mudam a linha dos títulos entre versões/idiomas.
+    Se a linha configurada tiver poucas células preenchidas, escolhe a linha em
+    1..scan_to com o maior número de células não vazias.
+    """
+    def _count_nonempty(row_idx: int) -> int:
+        n = 0
+        for cell in ws[row_idx]:
+            v = cell.value
+            if v is None:
+                continue
+            if isinstance(v, str) and not str(v).strip():
+                continue
+            n += 1
+        return n
+
+    try:
+        base = _count_nonempty(default_row)
+    except Exception:
+        return default_row
+
+    if base >= min_cols:
+        return default_row
+
+    best_row, best_cnt = default_row, base
+    for r in range(1, scan_to + 1):
+        try:
+            c = _count_nonempty(r)
+        except Exception:
+            continue
+        if c > best_cnt:
+            best_cnt, best_row = c, r
+
+    if best_row != default_row:
+        logger.info(
+            "guess_best_header_row: aba '%s' — linha %s tinha %s col.; usando linha %s (%s col.)",
+            getattr(ws, "title", "?"),
+            default_row,
+            base,
+            best_row,
+            best_cnt,
+        )
+    return best_row
+
+
+def compute_data_start_row(config: dict, resolved_header_row: int) -> int:
+    """Mantém o deslocamento header→dados do config, sem subir acima da linha antiga de dados."""
+    orig_h = int(config["header_row"])
+    orig_d = int(config["data_start"])
+    delta = max(1, orig_d - orig_h)
+    return max(orig_d, resolved_header_row + delta)
+
+
+def _norm_sheet_title(s: str) -> str:
+    return " ".join(s.replace("\xa0", " ").strip().split()).casefold()
+
+
+def guess_best_header_row_from_sheet_xml(
+    sheet_xml: bytes,
+    default_row: int,
+    *,
+    min_cols: int = 5,
+    scan_to: int = 40,
+) -> int:
+    """
+    Infere a linha de cabeçalho contando células (refs A1, B2, …) no XML da aba.
+    Mais fiel que openpyxl read-only para templates com muitas células vazias na
+    linha configurada (ex.: Shopee).
+    """
+    text = sheet_xml.decode("utf-8", errors="replace")
+    counts: dict[int, int] = {}
+    for _col, rn_s in re.findall(
+        r'<c\b[^>]*\br="([A-Z]{1,3})(\d+)"', text, flags=re.IGNORECASE
+    ):
+        try:
+            rn = int(rn_s)
+        except ValueError:
+            continue
+        if rn < 1 or rn > scan_to:
+            continue
+        counts[rn] = counts.get(rn, 0) + 1
+
+    if not counts:
+        return default_row
+
+    default_cnt = counts.get(default_row, 0)
+    if default_cnt >= min_cols:
+        return default_row
+
+    best_r, best_cnt = default_row, default_cnt
+    for r, c in counts.items():
+        if r > scan_to:
+            continue
+        if c > best_cnt or (c == best_cnt and r < best_r):
+            best_r, best_cnt = r, c
+
+    if best_cnt > default_cnt:
+        logger.info(
+            "guess_best_header_row_from_sheet_xml: linha padrão %s (%s <c>) → linha %s (%s <c>)",
+            default_row,
+            default_cnt,
+            best_r,
+            best_cnt,
+        )
+        return best_r
+    return default_row
 
 
 # ─── Escrita cirúrgica no XML ─────────────────────────────────────────────────
@@ -257,25 +364,96 @@ def _build_row_xml(
 def _find_sheet_zip_path(
     template_bytes: bytes, sheet_name: str
 ) -> Optional[str]:
-    """Retorna o caminho ZIP da aba. Independente da ordem dos atributos XML."""
-    import io as _io
-    with zipfile.ZipFile(_io.BytesIO(template_bytes)) as z:
-        wb_xml = z.read("xl/workbook.xml").decode("utf-8", errors="replace")
-        rid = None
-        for tag in re.findall(r'<sheet\b[^/]*/>', wb_xml):
-            name_m = re.search(r'name="([^"]+)"', tag)
-            rid_m  = re.search(r'r:id="([^"]+)"', tag)
-            if name_m and rid_m and name_m.group(1) == sheet_name:
-                rid = rid_m.group(1)
+    """
+    Retorna o caminho ZIP da worksheet (ex.: xl/worksheets/sheet3.xml).
+
+    Aceita ``<sheet>`` com ou sem auto-fechamento, prefixo de namespace e
+    ``Target`` com ou sem barra inicial; compara nomes de aba sem distinção
+    de maiúsculas e com espaços normalizados.
+    """
+    target_cf = _norm_sheet_title(sheet_name)
+
+    def _resolve_target_in_zip(z: zipfile.ZipFile, target_raw: str) -> str:
+        tgt = target_raw.replace("\\", "/").strip()
+        if tgt.startswith("/"):
+            tgt = tgt.lstrip("/")
+        if not tgt.startswith("xl/"):
+            tgt = "xl/" + tgt.lstrip("/")
+        norm = {n.replace("\\", "/").lower(): n for n in z.namelist()}
+        key = tgt.lower()
+        return norm.get(key, tgt)
+
+    buf = io.BytesIO(template_bytes)
+    with zipfile.ZipFile(buf, "r") as z:
+        try:
+            wb_xml = z.read("xl/workbook.xml").decode("utf-8", errors="replace")
+        except KeyError:
+            logger.warning("_find_sheet_zip_path: xl/workbook.xml ausente")
+            return None
+
+        sheets: list[tuple[str, str]] = []
+        for m in re.finditer(
+            r"<(?:[\w.\-]+:)?sheet\b([^>]+)>",
+            wb_xml,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            chunk = m.group(1).strip()
+            if chunk.endswith("/"):
+                chunk = chunk[:-1].strip()
+            name_m = re.search(r'name="([^"]*)"', chunk, flags=re.IGNORECASE)
+            rid_m = re.search(r'r:id="([^"]*)"', chunk, flags=re.IGNORECASE)
+            if not name_m or not rid_m:
+                continue
+            sheets.append((name_m.group(1), rid_m.group(1)))
+
+        if not sheets:
+            return None
+
+        rid: Optional[str] = None
+        for raw, r in sheets:
+            if raw == sheet_name or _norm_sheet_title(raw) == target_cf:
+                rid = r
                 break
         if rid is None:
+            for raw, r in sheets:
+                r_cf = _norm_sheet_title(raw)
+                if target_cf in r_cf or r_cf in target_cf:
+                    rid = r
+                    break
+
+        if rid is None:
+            logger.warning(
+                "_find_sheet_zip_path: aba '%s' não encontrada em workbook.xml (ex.: %s)",
+                sheet_name,
+                [s[0] for s in sheets[:10]],
+            )
             return None
-        rels_xml = z.read("xl/_rels/workbook.xml.rels").decode("utf-8", errors="replace")
-        t = re.search(r'Id="' + re.escape(rid) + r'"[^>]*Target="([^"]+)"', rels_xml)
-        if not t:
+
+        try:
+            rels_xml = z.read("xl/_rels/workbook.xml.rels").decode("utf-8", errors="replace")
+        except KeyError:
+            logger.warning("_find_sheet_zip_path: xl/_rels/workbook.xml.rels ausente")
             return None
-        target = t.group(1)
-        return target if target.startswith("xl/") else "xl/" + target
+
+        t_m = re.search(
+            rf'Id="{re.escape(rid)}"[^>]*Target="([^"]+)"',
+            rels_xml,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not t_m:
+            t_m = re.search(
+                rf'Target="([^"]+)"[^>]*Id="{re.escape(rid)}"',
+                rels_xml,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        if not t_m:
+            logger.warning(
+                "_find_sheet_zip_path: relação Id=%s não encontrada em workbook.xml.rels",
+                rid,
+            )
+            return None
+
+        return _resolve_target_in_zip(z, t_m.group(1))
 
 
 # ─── Filler ───────────────────────────────────────────────────────────────────
@@ -293,6 +471,53 @@ class MarketplaceFiller:
 
     def __init__(self):
         self._normalizer = FieldNormalizer()
+
+    def _resolve_layout_rows(
+        self, template_bytes: bytes, sheet_name: str, config: dict
+    ) -> tuple[int, int]:
+        """Infere linha de cabeçalho + início dos dados (XML da aba; fallback openpyxl)."""
+        import os
+        import tempfile
+
+        from openpyxl import load_workbook
+
+        from core.xlsx_openpyxl_compat import sanitize_xlsx_for_openpyxl
+
+        zp = _find_sheet_zip_path(template_bytes, sheet_name)
+        if zp:
+            try:
+                with zipfile.ZipFile(io.BytesIO(template_bytes), "r") as zf:
+                    sxml = zf.read(zp)
+                hr = guess_best_header_row_from_sheet_xml(
+                    sxml, config["header_row"]
+                )
+                return hr, compute_data_start_row(config, hr)
+            except Exception as exc:
+                logger.warning("layout via XML (%s) falhou: %s", zp, exc)
+
+        tmp_path = None
+        sanitized_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                tmp.write(template_bytes)
+                tmp_path = tmp.name
+            sanitized_path = sanitize_xlsx_for_openpyxl(tmp_path)
+            load_path = sanitized_path or tmp_path
+            wb = load_workbook(load_path, read_only=True)
+            try:
+                ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+                hr = guess_best_header_row(ws, config["header_row"])
+                dr = compute_data_start_row(config, hr)
+                return hr, dr
+            finally:
+                wb.close()
+        finally:
+            for _p in (sanitized_path, tmp_path):
+                if _p:
+                    try:
+                        os.unlink(_p)
+                    except OSError:
+                        pass
 
     # ── Pública ───────────────────────────────────────────────────────────────
 
@@ -356,9 +581,21 @@ class MarketplaceFiller:
                 errors=[f"Não foi possível localizar '{sheet_name}' no ZIP."],
             )
 
+        try:
+            header_row, data_start = self._resolve_layout_rows(
+                template_bytes, sheet_name, config
+            )
+        except Exception as exc:
+            logger.warning(
+                "Não foi possível inferir layout do template (%s); usando MARKETPLACE_CONFIG.",
+                exc,
+            )
+            header_row = int(config["header_row"])
+            data_start = int(config["data_start"])
+
         # ── Detectar tipos de campo pelos headers ─────────────────────────
         field_types = self._detect_field_types_from_zip(
-            template_bytes, sheet_zip_path, config["header_row"]
+            template_bytes, sheet_zip_path, header_row
         )
 
         # ── Construir dicionário de valores por linha/coluna ──────────────
@@ -397,7 +634,7 @@ class MarketplaceFiller:
                     data = zin.read(item.filename)
                     if item.filename == sheet_zip_path:
                         data = _inject_values_into_sheet_xml(
-                            data, config["data_start"], row_col_values
+                            data, data_start, row_col_values
                         )
                     zout.writestr(item, data)
 
@@ -429,10 +666,25 @@ class MarketplaceFiller:
         template_bytes: bytes, config: dict, marketplace: str
     ) -> Optional[str]:
         """Encontra o nome da aba correta dentro do ZIP."""
-        import io
         with zipfile.ZipFile(io.BytesIO(template_bytes)) as z:
-            wb_xml = z.read("xl/workbook.xml").decode("utf-8")
-        sheet_names = re.findall(r'<sheet[^>]*name="([^"]+)"', wb_xml)
+            wb_xml = z.read("xl/workbook.xml").decode("utf-8", errors="replace")
+        sheet_names = re.findall(
+            r'<(?:[\w.\-]+:)?sheet[^>]*name="([^"]+)"', wb_xml, flags=re.IGNORECASE
+        )
+
+        def _candidates() -> list[str]:
+            out: list[str] = []
+            seen: set[str] = set()
+            for key in ("sheet",):
+                v = config.get(key)
+                if isinstance(v, str) and v.strip() and v not in seen:
+                    seen.add(v)
+                    out.append(v)
+            for v in config.get("sheet_candidates") or []:
+                if isinstance(v, str) and v.strip() and v not in seen:
+                    seen.add(v)
+                    out.append(v)
+            return out
 
         # Amazon como destino: tenta candidatos em ordem
         if marketplace == "Amazon":
@@ -466,11 +718,22 @@ class MarketplaceFiller:
             logger.warning("Mercado Livre: estrutura inesperada; usando '%s'.", target_name)
             return target_name
 
+        cand_list = _candidates()
+        for cand in cand_list:
+            if cand in sheet_names:
+                return cand
+        for cand in cand_list:
+            c_low = cand.lower()
+            for s in sheet_names:
+                if c_low in s.lower() or s.lower() in c_low:
+                    logger.warning("Aba candidata '%s' → '%s'.", cand, s)
+                    return s
+
         target = config.get("sheet", "")
         if target in sheet_names:
             return target
         for name in sheet_names:
-            if target.lower() in name.lower():
+            if target and target.lower() in name.lower():
                 logger.warning("Aba '%s' não encontrada; usando '%s'.", target, name)
                 return name
         return sheet_names[0] if sheet_names else None
@@ -485,16 +748,23 @@ class MarketplaceFiller:
                 sheet_xml = z.read(sheet_zip_path)  # noqa: F841 — reservado para uso futuro
 
             from openpyxl import load_workbook
+
+            from core.xlsx_openpyxl_compat import sanitize_xlsx_for_openpyxl
+
             tmp_path = None
+            sanitized_path = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
                     tmp.write(template_bytes)
                     tmp_path = tmp.name
-                wb = load_workbook(tmp_path, read_only=True)
+                sanitized_path = sanitize_xlsx_for_openpyxl(tmp_path)
+                load_path = sanitized_path or tmp_path
+                wb = load_workbook(load_path, read_only=True)
                 types: dict[int, str] = {}
                 for ws_name in wb.sheetnames:
                     ws = wb[ws_name]
-                    for cell in ws[header_row]:
+                    hr = guess_best_header_row(ws, header_row)
+                    for cell in ws[hr]:
                         if not cell.value:
                             continue
                         col_name = _normalize_col(cell.value)
@@ -507,12 +777,14 @@ class MarketplaceFiller:
                 wb.close()
                 return types
             finally:
-                if tmp_path:
-                    try:
-                        import os as _os
-                        _os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                import os as _os
+
+                for _p in (sanitized_path, tmp_path):
+                    if _p:
+                        try:
+                            _os.unlink(_p)
+                        except OSError:
+                            pass
         except Exception as exc:
             logger.warning("Não foi possível detectar tipos de campo: %s", exc)
             return {}
@@ -554,11 +826,11 @@ class MarketplaceFiller:
             wb = load_workbook(output_path)
             ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
 
-            header_row = config["header_row"]
-            data_start = config["data_start"]
+            hr = guess_best_header_row(ws, config["header_row"])
+            data_start = compute_data_start_row(config, hr)
 
             col_map: dict[str, int] = {}
-            for cell in ws[header_row]:
+            for cell in ws[hr]:
                 if cell.value:
                     key = str(cell.value).strip().lower()
                     if key not in col_map:

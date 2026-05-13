@@ -232,6 +232,84 @@ Responda APENAS com JSON:
         self._cache[key] = result
         return result
 
+    # ── 4. Preenchimento por instrução ────────────────────────────────────────
+
+    def analyze_instruction_and_fill(
+        self,
+        column_name: str,
+        instruction_text: str,
+        accepted_values: list[str],
+        examples: list[str],
+        amazon_row_data: dict,
+        marketplace: str,
+    ) -> Optional[dict]:
+        """
+        Usa LLM para preencher uma coluna com base na instrução do template.
+        Chamado apenas para colunas obrigatórias que as estratégias sem IA
+        não conseguiram resolver.
+
+        Args:
+            column_name:      Nome da coluna destino.
+            instruction_text: Texto da instrução/regra extraído do template.
+            accepted_values:  Lista de valores aceitos (pode estar vazia).
+            examples:         Valores de exemplo do próprio template.
+            amazon_row_data:  Dados disponíveis na linha de origem.
+            marketplace:      Marketplace destino.
+
+        Returns:
+            {"value": str, "confidence": float, "reasoning": str} | None
+        """
+        # Cache por (marketplace, coluna, hash dos dados de origem)
+        row_hash = _cache_key(amazon_row_data)
+        key = _cache_key(
+            "instruction_fill", marketplace, column_name,
+            instruction_text[:100], row_hash,
+        )
+        if key in self._cache:
+            return self._cache[key]
+
+        # Monta contexto compacto: apenas campos relevantes da linha
+        relevant_data = {
+            k: v for k, v in amazon_row_data.items()
+            if v and str(v).strip() not in ("", "nan", "None")
+            and len(str(k)) < 60
+        }
+
+        accepted_str = ""
+        if accepted_values:
+            accepted_str = f"\nValores aceitos: {' | '.join(accepted_values[:20])}"
+
+        examples_str = ""
+        if examples:
+            examples_str = f"\nExemplos do template: {', '.join(str(e) for e in examples[:3])}"
+
+        prompt = f"""Você é um especialista em catálogos de marketplace.
+
+Marketplace: {marketplace}
+Coluna a preencher: "{column_name}"
+Instrução do template: {instruction_text or '(sem instrução disponível)'}
+{accepted_str}
+{examples_str}
+
+Dados disponíveis do produto de origem:
+{json.dumps(relevant_data, ensure_ascii=False, indent=2, default=str)[:800]}
+
+Tarefa: Determine o valor mais adequado para a coluna "{column_name}" com base
+nos dados do produto e nas regras do template.
+{"Escolha APENAS um dos valores aceitos listados." if accepted_values else ""}
+
+Responda APENAS com JSON:
+{{
+  "value": "<valor para preencher na coluna>",
+  "confidence": <0.0 a 1.0>,
+  "reasoning": "<explicação em 1 linha>"
+}}"""
+
+        raw = _call_llm(prompt, max_tokens=200)
+        result = _parse_json(raw)
+        self._cache[key] = result
+        return result
+
     # ── Cache management ──────────────────────────────────────────────────────
 
     def clear_cache(self) -> None:

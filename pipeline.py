@@ -3,7 +3,7 @@ pipeline.py
 ===========
 Orquestrador principal do SellersFlow.
 
-Une Reader → Mapper → (AIEngine) → Filler em um pipeline único.
+Une Reader → Mapper → RuleFiller → AI Fill → Filler em um pipeline único.
 É o único ponto de entrada que o app.py (Streamlit) precisa chamar.
 
 Design:
@@ -11,7 +11,14 @@ Design:
   - Retorna PipelineResult com todos os artefatos e logs
   - Suporta modo "dry_run" (mapeia mas não grava arquivo)
   - Suporta enriquecimento por IA (opt-in)
+  - Suporta análise de instruções do template (opt-in)
   - Suporta qualquer marketplace como ORIGEM (não apenas Amazon)
+
+Fases (com use_instructions=True):
+  FASE 1: Mapeamento de colunas (estratégias: aprendido → fixo → similaridade → IA)
+  FASE 2: RuleBasedFiller (lookup de valores aceitos, concatenação, herança de exemplo)
+  FASE 3: AI fill para obrigatórias ainda vazias
+  FASE 4: Herança de exemplos para opcionais ainda vazias
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from __future__ import annotations
 import io
 import logging
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -27,10 +35,18 @@ import pandas as pd
 
 from core.reader import AmazonSheetReader, AmazonReadResult
 from core.source_reader import MarketplaceSourceReader, SourceReadResult
-from core.mapper import ColumnMapper, MappingResult
-from core.filler import MarketplaceFiller, FillResult
+from core.mapper import ColumnMapper, MappingResult, FieldMappingDecision
+from core.filler import (
+    MarketplaceFiller,
+    FillResult,
+    guess_best_header_row,
+    guess_best_header_row_from_sheet_xml,
+    _find_sheet_zip_path,
+)
 from core.enricher import EnricherPipeline
 from core.enricher.enricher_pipeline import detect_empty_fields
+from core.instruction_parser import InstructionParser, ColumnRule
+from core.rule_filler import RuleBasedFiller
 from ai.ai_engine import AIEngine
 
 logger = logging.getLogger(__name__)
@@ -52,6 +68,10 @@ class PipelineResult:
     read_result: Optional[AmazonReadResult] = None
     mapping_result: Optional[MappingResult] = None
     fill_result: Optional[FillResult] = None
+
+    # Cobertura por fase (preenchida quando use_instructions=True)
+    # {"fase1_mapping": 0.65, "fase2_rule": 0.12, "fase3_ai": 0.05, "total": 0.82}
+    phase_coverage: dict[str, float] = field(default_factory=dict)
 
     # Flags de alto nível
     success: bool = False
@@ -100,8 +120,10 @@ class SellersFlowPipeline:
         self._mapper = ColumnMapper(db_path=db_path or DEFAULT_DB_PATH)
         self._filler = MarketplaceFiller()
         self._ai = AIEngine()
+        self._instruction_parser = InstructionParser()
+        self._rule_filler = RuleBasedFiller()
         self._output_dir = output_dir
-        self._enricher_pipeline: Optional[EnricherPipeline] = None  # built lazily per run()
+        self._enricher_pipeline: Optional[EnricherPipeline] = None
 
     # ── Pública ───────────────────────────────────────────────────────────────
 
@@ -114,6 +136,7 @@ class SellersFlowPipeline:
         enrich_ai: bool = False,
         dry_run: bool = False,
         source_marketplace: str = "Amazon",
+        use_instructions: bool = False,
     ) -> PipelineResult:
         """
         Executa o pipeline completo.
@@ -126,9 +149,12 @@ class SellersFlowPipeline:
             enrich_ai:          Se True, aplica enriquecimento de conteúdo via IA.
             dry_run:            Se True, não grava arquivo de saída.
             source_marketplace: Marketplace ORIGEM dos dados (default "Amazon").
+            use_instructions:   Se True, ativa as fases 2-4 (RuleFiller + AI fill
+                                + herança de exemplos) usando as abas de instrução
+                                do template.
 
         Returns:
-            PipelineResult completo.
+            PipelineResult completo (com phase_coverage preenchido se use_instructions).
         """
         t0 = time.perf_counter()
         result = PipelineResult(marketplace=marketplace, elapsed_seconds=0.0)
@@ -194,8 +220,8 @@ class SellersFlowPipeline:
             result.elapsed_seconds = time.perf_counter() - t0
             return result
 
-        # ── Etapa 4: Mapeamento ───────────────────────────────────────────
-        logger.info("[Pipeline] Construindo mapeamento...")
+        # ── Etapa 4: Mapeamento (FASE 1) ─────────────────────────────────
+        logger.info("[Pipeline] FASE 1 — Construindo mapeamento...")
         ai_engine = self._ai if use_ai else None
         mapping = self._mapper.build_mapping(
             amazon_df=amazon_df,
@@ -204,6 +230,19 @@ class SellersFlowPipeline:
             ai_engine=ai_engine,
         )
         result.mapping_result = mapping
+
+        # ── Fases 2-4: Análise de instruções (opt-in) ─────────────────
+        if use_instructions:
+            amazon_df, mapping = self._apply_instruction_phases(
+                amazon_df=amazon_df,
+                mapping=mapping,
+                dest_headers=dest_headers,
+                template_bytes=_template_bytes,
+                marketplace=marketplace,
+                use_ai=use_ai,
+                result=result,
+            )
+            result.mapping_result = mapping
 
         if dry_run:
             result.success = True
@@ -267,6 +306,237 @@ class SellersFlowPipeline:
         """Persiste uma decisão de mapeamento confirmada pelo usuário."""
         self._mapper.learn(marketplace, dest_col, source_col)
 
+    # ── Fases 2-4: instrução + regra + IA ────────────────────────────────────
+
+    def _apply_instruction_phases(
+        self,
+        amazon_df: pd.DataFrame,
+        mapping: MappingResult,
+        dest_headers: dict[int, str],
+        template_bytes: bytes,
+        marketplace: str,
+        use_ai: bool,
+        result: PipelineResult,
+    ) -> tuple[pd.DataFrame, MappingResult]:
+        """
+        FASE 2: RuleBasedFiller — lookup, concatenação, herança de exemplo
+        FASE 3: AI fill — para obrigatórias ainda vazias (se use_ai=True)
+        FASE 4: Herança de exemplos — para opcionais ainda vazias
+
+        dest_headers: {excel_col_idx: col_name} — chave é o índice real no Excel.
+        Retorna (amazon_df aumentado, mapping atualizado).
+        """
+        from core.filler import MARKETPLACE_CONFIG
+
+        config = MARKETPLACE_CONFIG.get(marketplace, {})
+        header_row = int(config.get("header_row", 3))
+
+        # Aba de dados para o parser
+        try:
+            data_sheet = self._filler._resolve_sheet_name(template_bytes, config, marketplace)
+        except Exception:
+            data_sheet = ""
+        if not data_sheet:
+            logger.warning("[Fases 2-4] Aba não determinada para '%s'", marketplace)
+            return amazon_df, mapping
+
+        # ── Parse de instruções ───────────────────────────────────────────────
+        logger.info("[Pipeline] FASE 2-4 — Parseando instruções de '%s'...", marketplace)
+        col_rules = self._instruction_parser.parse(
+            template_bytes, marketplace, data_sheet, header_row
+        )
+        example_rows = self._collect_example_rows(template_bytes, marketplace)
+
+        # ── Constrói mapa bidirecional excel_col_idx ↔ col_name ──────────────
+        # dest_headers: {excel_col_idx: col_name}
+        # Decisões são geradas em ordem de dest_headers.items()
+        col_name_to_excel_idx: dict[str, int] = {v: k for k, v in dest_headers.items()}
+
+        # Colunas sem source_idx = candidatas para preenchimento por regra
+        # Usamos excel_col_idx como chave (o que o index_map usa)
+        unmapped: dict[int, str] = {
+            col_name_to_excel_idx[d.dest_col]: d.dest_col
+            for d in mapping.decisions
+            if d.source_idx is None and d.dest_col in col_name_to_excel_idx
+        }
+
+        total_dest = len(mapping.decisions)
+        mapped_before = total_dest - len(unmapped)
+        result.phase_coverage["fase1_mapping"] = round(mapped_before / total_dest, 3) if total_dest else 0.0
+        logger.info(
+            "[Pipeline] FASE 1 cobertura: %d/%d (%.0f%%)",
+            mapped_before, total_dest, result.phase_coverage["fase1_mapping"] * 100,
+        )
+
+        if not unmapped:
+            for k in ("fase2_rule", "fase3_ai", "fase4_exemplo"):
+                result.phase_coverage[k] = 0.0
+            result.phase_coverage["total"] = result.phase_coverage["fase1_mapping"]
+            return amazon_df, mapping
+
+        # Índice reverso: dec_list_pos de cada dest_col
+        dec_idx_by_col: dict[str, int] = {
+            d.dest_col: i for i, d in enumerate(mapping.decisions)
+        }
+
+        def _update_mapping(
+            aug_df: pd.DataFrame,
+            col_name: str,
+            col_key: str,
+            strategy: str,
+            confidence: float,
+            notes: str,
+        ) -> bool:
+            """Atualiza decision + index_map com a nova coluna virtual. Retorna True se ok."""
+            excel_idx = col_name_to_excel_idx.get(col_name)
+            dec_i = dec_idx_by_col.get(col_name)
+            if excel_idx is None or dec_i is None or col_key not in aug_df.columns:
+                return False
+            src_idx = aug_df.columns.get_loc(col_key)
+            mapping.decisions[dec_i] = FieldMappingDecision(
+                dest_col=col_name,
+                source_col=col_key,
+                source_idx=src_idx,
+                strategy=strategy,
+                confidence=confidence,
+                notes=notes,
+            )
+            mapping.index_map[excel_idx] = src_idx
+            if col_name in mapping.unmapped_dest:
+                mapping.unmapped_dest.remove(col_name)
+            return True
+
+        # ── FASE 2: RuleBasedFiller ───────────────────────────────────────────
+        logger.info("[Pipeline] FASE 2 — RuleBasedFiller (%d cols)...", len(unmapped))
+        aug_df, rf_idx_map = self._rule_filler.build_augmented_df(
+            amazon_df=amazon_df,
+            unmapped_dest=unmapped,          # {excel_col_idx: col_name}
+            col_rules=col_rules,
+            example_rows=example_rows,
+        )
+
+        fase2_new = 0
+        for excel_col_idx, col_name in unmapped.items():
+            if excel_col_idx in rf_idx_map:
+                col_key = f"__rf__{col_name}"
+                if _update_mapping(aug_df, col_name, col_key, "rule", 0.75,
+                                   "Preenchido por RuleBasedFiller (instrução do template)."):
+                    fase2_new += 1
+
+        result.phase_coverage["fase2_rule"] = round(fase2_new / total_dest, 3) if total_dest else 0.0
+        logger.info("[Pipeline] FASE 2: +%d colunas (%.0f%%)", fase2_new, result.phase_coverage["fase2_rule"] * 100)
+
+        # ── FASE 3: AI fill para obrigatórias ainda vazias ───────────────────
+        fase3_new = 0
+        if use_ai:
+            logger.info("[Pipeline] FASE 3 — AI fill obrigatórias...")
+            still_unmapped_3 = {
+                ei: col
+                for ei, col in unmapped.items()
+                if ei not in rf_idx_map
+                and (rule := col_rules.get(col)) and rule.obrigatorio
+            }
+            if still_unmapped_3:
+                ai_vals: dict[str, list] = {col: [] for col in still_unmapped_3.values()}
+                for _, row in aug_df.iterrows():
+                    src = {k: v for k, v in row.to_dict().items() if not str(k).startswith("__")}
+                    for col_name in still_unmapped_3.values():
+                        rule = col_rules.get(col_name)
+                        if not rule:
+                            ai_vals[col_name].append(None)
+                            continue
+                        ai_res = self._ai.analyze_instruction_and_fill(
+                            column_name=col_name,
+                            instruction_text=rule.regra,
+                            accepted_values=rule.valores_aceitos,
+                            examples=[rule.exemplo] if rule.exemplo else [],
+                            amazon_row_data=src,
+                            marketplace=marketplace,
+                        )
+                        ai_vals[col_name].append(ai_res.get("value") if ai_res else None)
+
+                for col_name in still_unmapped_3.values():
+                    vals = ai_vals[col_name]
+                    if any(v for v in vals):
+                        col_key = f"__ai__{col_name}"
+                        aug_df[col_key] = vals
+                        if _update_mapping(aug_df, col_name, col_key, "ai_instruction", 0.7,
+                                           "Preenchido por IA usando instrução do template."):
+                            fase3_new += 1
+
+        result.phase_coverage["fase3_ai"] = round(fase3_new / total_dest, 3) if total_dest else 0.0
+        logger.info("[Pipeline] FASE 3: +%d colunas (%.0f%%)", fase3_new, result.phase_coverage["fase3_ai"] * 100)
+
+        # ── FASE 4: Herança de exemplos para opcionais ───────────────────────
+        fase4_new = 0
+        if example_rows:
+            from core.rule_filler import _from_example
+            filled_so_far = set(rf_idx_map.keys())
+            still_unmapped_4 = {
+                ei: col
+                for ei, col in unmapped.items()
+                if ei not in filled_so_far
+                and (di := dec_idx_by_col.get(col)) is not None
+                and mapping.decisions[di].source_idx is None
+            }
+            for col_name in still_unmapped_4.values():
+                ex_val = _from_example(col_name, example_rows)
+                if ex_val:
+                    col_key = f"__ex__{col_name}"
+                    aug_df[col_key] = [ex_val] * len(aug_df)
+                    if _update_mapping(aug_df, col_name, col_key, "exemplo", 0.5,
+                                       "Herdado da aba de exemplos do template."):
+                        fase4_new += 1
+
+        result.phase_coverage["fase4_exemplo"] = round(fase4_new / total_dest, 3) if total_dest else 0.0
+
+        total_mapped = mapped_before + fase2_new + fase3_new + fase4_new
+        result.phase_coverage["total"] = round(total_mapped / total_dest, 3) if total_dest else 0.0
+        logger.info(
+            "[Pipeline] Cobertura final: %d/%d (%.0f%%) — F1=%d F2=%d F3=%d F4=%d",
+            total_mapped, total_dest, result.phase_coverage["total"] * 100,
+            mapped_before, fase2_new, fase3_new, fase4_new,
+        )
+        return aug_df, mapping
+
+    def _collect_example_rows(
+        self, template_bytes: bytes, marketplace: str
+    ) -> list[dict]:
+        """Extrai linhas de exemplo das abas de exemplo do template."""
+        from core.instruction_parser import _load_wb, _EXAMPLE_PATTERNS, _norm
+        import warnings as _w
+        _w.filterwarnings("ignore")
+
+        rows: list[dict] = []
+        try:
+            wb = _load_wb(template_bytes)
+            for sheet_name in wb.sheetnames:
+                sn = _norm(sheet_name)
+                if not any(p in sn for p in _EXAMPLE_PATTERNS):
+                    continue
+                ws = wb[sheet_name]
+                all_rows = list(ws.iter_rows(values_only=True))
+                if len(all_rows) < 2:
+                    continue
+                # Find header row
+                hdr_idx = 0
+                best = 0
+                for i, r in enumerate(all_rows[:5]):
+                    cnt = sum(1 for v in r if v)
+                    if cnt > best:
+                        best, hdr_idx = cnt, i
+                headers = [str(v).strip() if v else "" for v in all_rows[hdr_idx]]
+                for row in all_rows[hdr_idx + 1: hdr_idx + 8]:
+                    if not row:
+                        continue
+                    rd = {headers[i]: str(v) for i, v in enumerate(row) if i < len(headers) and headers[i] and v}
+                    if rd:
+                        rows.append(rd)
+            wb.close()
+        except Exception as exc:
+            logger.warning("_collect_example_rows falhou: %s", exc)
+        return rows
+
     # ── Privadas ──────────────────────────────────────────────────────────────
 
     def _read_template_headers(
@@ -294,12 +564,18 @@ class SellersFlowPipeline:
             return None
 
         tmp_path = None
+        sanitized_path = None
         try:
+            from core.xlsx_openpyxl_compat import sanitize_xlsx_for_openpyxl
+
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 tmp.write(template_bytes)
                 tmp_path = tmp.name
 
-            wb = load_workbook(tmp_path, read_only=True)
+            sanitized_path = sanitize_xlsx_for_openpyxl(tmp_path)
+            load_path = sanitized_path or tmp_path
+
+            wb = load_workbook(load_path, read_only=True)
             logger.info("Template '%s' — abas: %s", marketplace, wb.sheetnames)
 
             if marketplace == "Vendor":
@@ -352,8 +628,29 @@ class SellersFlowPipeline:
                         )
                 ws = wb[sheet] if sheet in wb.sheetnames else wb.active
 
+            zp = _find_sheet_zip_path(template_bytes, ws.title)
+            header_row = config["header_row"]
+            if zp:
+                try:
+                    with zipfile.ZipFile(io.BytesIO(template_bytes), "r") as zf:
+                        header_row = guess_best_header_row_from_sheet_xml(
+                            zf.read(zp), config["header_row"]
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Cabeçalho via XML falhou (%s); tentando openpyxl.", exc,
+                    )
+                    header_row = guess_best_header_row(ws, config["header_row"])
+            else:
+                logger.warning(
+                    "Não foi possível localizar a aba '%s' no ZIP (workbook); "
+                    "cabeçalho só via openpyxl.",
+                    ws.title,
+                )
+                header_row = guess_best_header_row(ws, config["header_row"])
+
             headers = {}
-            for cell in ws[config["header_row"]]:
+            for cell in ws[header_row]:
                 if cell.value:
                     headers[cell.column] = cell.value
 
@@ -368,11 +665,12 @@ class SellersFlowPipeline:
             )
             return None
         finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+            for _p in (sanitized_path, tmp_path):
+                if _p:
+                    try:
+                        os.unlink(_p)
+                    except OSError:
+                        pass
 
     def _apply_enrichment(
         self, df: pd.DataFrame, marketplace: str
