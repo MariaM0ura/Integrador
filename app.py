@@ -139,26 +139,26 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
 
-    /* ── Tokens SellersFlow ── */
+    /* ── Tokens SellersFlow (tema fundo vermelho) ── */
     :root {
-        --sf-blue:      #008CFF;
-        --sf-blue-dark: #0062B2;
-        --sf-blue-deep: #0D192E;
-        --sf-blue-navy: #2A3954;
-        --sf-blue-mid:  #424F67;
-        --sf-blue-lt:   #5FC7F4;
-        --sf-blue-pale: #A5DFF8;
-        --bg-base:      #060E1A;
-        --bg-surface:   #0B1626;
-        --bg-raised:    #101E30;
-        --bg-elevated:  #152438;
-        --border-sub:   rgba(42,57,84,0.6);
-        --border-def:   rgba(66,79,103,0.5);
-        --border-acc:   rgba(0,140,255,0.35);
-        --text-pri:     #E8F4FF;
-        --text-sec:     #8BA5C4;
-        --text-muted:   #4A6480;
-        --text-acc:     #5FC7F4;
+        --sf-blue:      #FF4D4D;
+        --sf-blue-dark: #C62828;
+        --sf-blue-deep: #2E0A0A;
+        --sf-blue-navy: #4A1515;
+        --sf-blue-mid:  #6B2828;
+        --sf-blue-lt:   #FF8A8A;
+        --sf-blue-pale: #FFC4C4;
+        --bg-base:      #1a0505;
+        --bg-surface:   #240808;
+        --bg-raised:    #2e0c0c;
+        --bg-elevated:  #3a1010;
+        --border-sub:   rgba(120, 40, 40, 0.55);
+        --border-def:   rgba(160, 60, 60, 0.45);
+        --border-acc:   rgba(255, 80, 80, 0.4);
+        --text-pri:     #FFF0F0;
+        --text-sec:     #E8B4B4;
+        --text-muted:   #9A5C5C;
+        --text-acc:     #FF8A8A;
     }
 
     /* ── 1. Remover barra branca do topo ── */
@@ -183,8 +183,8 @@ st.markdown("""
         position: fixed;
         inset: 0;
         background-image:
-            linear-gradient(rgba(0,140,255,0.025) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(0,140,255,0.025) 1px, transparent 1px);
+            linear-gradient(rgba(255, 60, 60, 0.04) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 60, 60, 0.04) 1px, transparent 1px);
         background-size: 44px 44px;
         pointer-events: none;
         z-index: 0;
@@ -210,11 +210,11 @@ st.markdown("""
     }
     .sf-logo-img {
         width: 36px; height: 36px; object-fit: contain; border-radius: 8px;
-        filter: drop-shadow(0 0 8px rgba(0,140,255,0.45));
+        filter: drop-shadow(0 0 8px rgba(255, 80, 80, 0.45));
     }
     .sf-logo-text {
         font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em;
-        background: linear-gradient(135deg, #008CFF, #5FC7F4);
+        background: linear-gradient(135deg, #FF4D4D, #FF8A8A);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         background-clip: text; line-height: 1.1;
     }
@@ -287,15 +287,15 @@ st.markdown("""
 
     /* ── Botão primário ── */
     .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #0062B2 0%, #008CFF 60%, #32A3FF 100%) !important;
+        background: linear-gradient(135deg, #9B1C1C 0%, #D32F2F 60%, #FF5252 100%) !important;
         border: none !important; border-radius: 10px !important;
         color: white !important; font-family: 'DM Sans', sans-serif !important;
         font-weight: 600 !important; font-size: 0.9rem !important;
-        box-shadow: 0 2px 14px rgba(0,140,255,0.35) !important;
+        box-shadow: 0 2px 14px rgba(255, 60, 60, 0.35) !important;
         transition: all 0.2s ease !important;
     }
     .stButton > button[kind="primary"]:hover {
-        box-shadow: 0 4px 22px rgba(0,140,255,0.55) !important;
+        box-shadow: 0 4px 22px rgba(255, 60, 60, 0.55) !important;
         transform: translateY(-1px) !important;
     }
     .stButton > button[kind="primary"]:disabled {
@@ -314,14 +314,14 @@ st.markdown("""
 
     /* ── Download button ── */
     [data-testid="stDownloadButton"] > button {
-        background: linear-gradient(135deg, #0062B2 0%, #008CFF 60%, #32A3FF 100%) !important;
+        background: linear-gradient(135deg, #9B1C1C 0%, #D32F2F 60%, #FF5252 100%) !important;
         border: none !important; border-radius: 10px !important;
         color: white !important; font-weight: 600 !important;
-        box-shadow: 0 2px 14px rgba(0,140,255,0.35) !important;
+        box-shadow: 0 2px 14px rgba(255, 60, 60, 0.35) !important;
         transition: all 0.2s ease !important;
     }
     [data-testid="stDownloadButton"] > button:hover {
-        box-shadow: 0 4px 22px rgba(0,140,255,0.55) !important;
+        box-shadow: 0 4px 22px rgba(255, 60, 60, 0.55) !important;
         transform: translateY(-1px) !important;
     }
 
@@ -330,7 +330,7 @@ st.markdown("""
         background: var(--bg-elevated) !important; border-radius: 999px !important;
     }
     [data-testid="stProgress"] > div > div > div {
-        background: linear-gradient(90deg, #0062B2, #008CFF, #5FC7F4) !important;
+        background: linear-gradient(90deg, #9B1C1C, #D32F2F, #FF8A8A) !important;
         border-radius: 999px !important;
     }
 
@@ -343,7 +343,7 @@ st.markdown("""
     }
     [data-testid="stMetric"]:hover {
         border-color: var(--border-acc) !important;
-        box-shadow: 0 0 20px rgba(0,140,255,0.12) !important;
+        box-shadow: 0 0 20px rgba(255, 60, 60, 0.12) !important;
     }
     [data-testid="stMetricLabel"] {
         font-size: 0.68rem !important; font-weight: 600 !important;
@@ -392,8 +392,8 @@ st.markdown("""
 
     /* ── Multiselect tags ── */
     [data-baseweb="tag"] {
-        background: rgba(0,140,255,0.14) !important;
-        border: 1px solid rgba(0,140,255,0.28) !important;
+        background: rgba(255, 60, 60, 0.14) !important;
+        border: 1px solid rgba(255, 80, 80, 0.28) !important;
         border-radius: 6px !important; color: var(--text-acc) !important;
         font-size: 0.78rem !important;
     }
@@ -417,7 +417,7 @@ st.markdown("""
     /* ── Page title ── */
     .sf-page-title {
         font-size: 1.55rem; font-weight: 700; letter-spacing: -0.03em;
-        background: linear-gradient(135deg, #E8F4FF 20%, #5FC7F4 100%);
+        background: linear-gradient(135deg, #FFF0F0 20%, #FF8A8A 100%);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         background-clip: text;
     }
@@ -442,7 +442,7 @@ st.markdown("""
         font-size: 0.7rem; font-weight: 600; letter-spacing: 0.03em;
     }
     .badge-green  { background: rgba(0,180,80,0.12);  color: #34D37A; border: 1px solid rgba(0,180,80,0.2); }
-    .badge-blue   { background: rgba(0,140,255,0.12); color: #5FC7F4; border: 1px solid rgba(0,140,255,0.25); }
+    .badge-blue   { background: rgba(255, 100, 120, 0.14); color: #FFB4B4; border: 1px solid rgba(255, 100, 120, 0.28); }
     .badge-orange { background: rgba(255,150,0,0.12); color: #FBAD3C; border: 1px solid rgba(255,150,0,0.2); }
     .badge-violet { background: rgba(150,80,255,0.12);color: #C084FC; border: 1px solid rgba(150,80,255,0.2); }
     .badge-red    { background: rgba(255,60,60,0.12); color: #F87171; border: 1px solid rgba(255,60,60,0.2); }
