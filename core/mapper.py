@@ -40,6 +40,19 @@ logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.72
 
+# Columns that have no Amazon equivalent — skip similarity to avoid false positives.
+SIMILARITY_BLOCKED_COLS: dict[str, frozenset[str]] = {
+    "Shopee": frozenset({
+        "imagem de capa", "imagem por variacao", "imagem de tamanhos",
+        "imagem do produto", "nome da variacao 1", "nome da variacao 2",
+        "numero de integracao de variacao",
+        "template da tabela de medidas", "ids de compatibilidade",
+        "produto e um item agrupavel", "gtin da unidade tributavel",
+        "quantidade da unidade tributavel", "unidade de medida do item agrupavel",
+        "motivo da falha",
+    }),
+}
+
 AMAZON_SYNONYMS: dict[str, list[str]] = {
     "sku": ["sku", "seller sku", "sellers sku", "sku do vendedor", "sku principal",
             "sku do fornecedor", "contribution goods", "contribution sku"],
@@ -82,7 +95,7 @@ AMAZON_SYNONYMS: dict[str, list[str]] = {
     "cor": ["color", "colour", "cor"],
     "tamanho": ["size", "tamanho"],
     "fabricante": ["manufacturer", "fabricante"],
-    "tipo_produto": ["item type keyword", "tipo de produto", "product type"],
+    "tipo_produto": ["item type keyword", "tipo de produto", "product type", "categoria", "category"],
     "hierarquia": ["parentage level", "nível de hierarquia", "nivel de hierarquia"],
     "sku_pai": ["parent sku", "sku do produto pai", "sku pai"],
     "pais_origem": ["country of origin", "país de origem", "pais de origem",
@@ -143,19 +156,29 @@ MARKETPLACE_MAPPINGS: dict[str, dict[str, list[str]]] = {
         "Country/Region of Origin": ["pais_origem"],
     },
     "Shopee": {
+        # Identificação
         "sku principal": ["sku"],
+        "sku da variação": ["sku"],
         "nome do produto": ["nome_produto"],
         "descrição do produto": ["descricao"],
+        # Preço e estoque
         "preço": ["preco"],
         "estoque": ["quantidade"],
+        # Identificadores
         "gtin (ean)": ["id_produto"],
+        "categoria": ["tipo_produto"],
+        # Dimensões e peso
+        "peso": ["peso_pacote"],
+        "comprimento": ["comprimento_pacote"],
+        "altura": ["altura_pacote"],
+        "largura": ["largura_pacote"],
+        # Fiscal
         "ncm": ["ncm"],
-        "Origem": ["origem_mercadoria"],
-        "CEST": ["cest"],
-        "Peso": ["peso_pacote"],
-        "Comprimento": ["comprimento_pacote"],
-        "Altura": ["altura_pacote"],
-        "Largura": ["largura_pacote"],
+        "origem": ["origem_mercadoria"],
+        "cest": ["cest"],
+        # Variações — opção mapeia para cor ou tamanho (similaridade resolverá)
+        "opção para variação 1": ["tamanho", "cor"],
+        "opção para variação 2": ["cor", "tamanho"],
     },
     "Mercado Livre": {
         "título: informe o produto, marca, modelo e destaque as características principais \ncaso crie variações, você deve criar um título geral para todas": ["nome_produto"],
@@ -232,7 +255,7 @@ MARKETPLACE_MAPPINGS: dict[str, dict[str, list[str]]] = {
 }
 
 REQUIRED_FIELDS: dict[str, list[str]] = {
-    "Shopee": ["SKU Principal", "Nome do Produto", "Preço", "Estoque"],
+    "Shopee": ["Nome do Produto", "Descrição do Produto", "Preço", "Estoque", "Peso"],
     "Temu": ["Contribution Goods", "Product Name"],
     "Vendor": ["SKU do fornecedor", "Nome do Produto"],
     "Magalu": ["SKU", "TITULO_PRODUTO"],
@@ -718,6 +741,14 @@ class ColumnMapper:
                             )
 
         # ── Estratégia 2: Similaridade ────────────────────────────────────
+        blocked = SIMILARITY_BLOCKED_COLS.get(marketplace, frozenset())
+        if dest_norm in blocked or any(dest_norm.startswith(b) for b in blocked):
+            return FieldMappingDecision(
+                dest_col=dest_col, source_col=None, source_idx=None,
+                strategy="unmapped", confidence=0.0,
+                notes="Coluna sem equivalente Amazon — similaridade bloqueada.",
+            )
+
         best_sim, best_col, best_idx = 0.0, None, None
         for norm_col, idx in amazon_norm.items():
             if idx in used:

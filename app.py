@@ -566,6 +566,23 @@ with st.sidebar:
         ),
     )
 
+    # Shopee-specific: show rule count when template is uploaded
+    if marketplace == "Shopee" and dest_file and use_instructions:
+        try:
+            from core.instruction_parser import InstructionParser
+            _shopee_raw = dest_file.read()
+            dest_file.seek(0)
+            _sp = InstructionParser()
+            _sp_rules = _sp.parse(_shopee_raw, "Shopee", "Modelo", header_row=3)
+            _obr = sum(1 for r in _sp_rules.values() if r.obrigatorio)
+            st.info(
+                f"📋 Template Shopee: **{len(_sp_rules)} colunas** extraídas "
+                f"({_obr} obrigatórias)",
+                icon="ℹ️",
+            )
+        except Exception:
+            pass
+
     st.divider()
     run_btn = st.button(
         "▶ Processar",
@@ -675,19 +692,34 @@ else:
 
         # Cobertura por fase (quando use_instructions ativo)
         if result.phase_coverage:
+            # Alert for low total coverage
+            total_cov = result.phase_coverage.get("total", 1.0)
+            if total_cov < 0.75:
+                st.warning(
+                    f"⚠️ Cobertura total baixa ({total_cov:.0%}). Ative 'Usar análise de "
+                    "instruções do template' ou use IA para preencher colunas sem equivalente "
+                    "na origem.",
+                    icon="⚠️",
+                )
+
             st.markdown("**📊 Cobertura por fase**")
-            ph_cols = st.columns(5)
+            ph_cols = st.columns(6)
             _PHASE_LABELS = [
                 ("Fase 1 Mapeamento", "fase1_mapping"),
                 ("Fase 2 Regras",     "fase2_rule"),
                 ("Fase 3 IA Instr.",  "fase3_ai"),
                 ("Fase 4 Exemplos",   "fase4_exemplo"),
                 ("Total",             "total"),
+                ("Obrigatórios",      "mandatory_coverage"),
             ]
             for i, (lbl, key) in enumerate(_PHASE_LABELS):
                 val = result.phase_coverage.get(key, 0.0)
                 with ph_cols[i]:
-                    st.metric(lbl, f"{val:.0%}")
+                    delta = None
+                    if key == "mandatory_coverage" and val < 1.0:
+                        delta = f"{val - 1.0:.0%}"
+                    st.metric(lbl, f"{val:.0%}", delta=delta,
+                              delta_color="inverse" if delta else "normal")
 
     # ── Avisos e validação ────────────────────────────────────────────────
     if result.warnings:
@@ -754,15 +786,27 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
+            # Mandatory cols for current marketplace (for low-confidence highlight)
+            from core.mapper import REQUIRED_FIELDS as _REQUIRED_FIELDS
+            _mandatory_set = set(_REQUIRED_FIELDS.get(marketplace, []))
+
             for d in filtered:
                 label, color = STRATEGY_LABELS.get(d.strategy, (d.strategy, ""))
                 conf_icon = confidence_icon(d.confidence)
                 source_display = d.source_col or "—"
                 badge_class = f"badge badge-{color}" if color else "badge"
 
+                # Highlight mandatory cols with low confidence in orange
+                is_mandatory_low_conf = (
+                    d.dest_col in _mandatory_set
+                    and d.source_col is not None
+                    and d.confidence < 0.72
+                )
+                row_style = "background:#2a1800;border-left:3px solid #ff8800;" if is_mandatory_low_conf else ""
+
                 st.markdown(f"""
-                <div class="map-row">
-                    <div class="map-col" style="color:#c0c0e0"><strong>{d.dest_col}</strong></div>
+                <div class="map-row" style="{row_style}">
+                    <div class="map-col" style="color:#c0c0e0"><strong>{d.dest_col}</strong>{"⚠️" if is_mandatory_low_conf else ""}</div>
                     <div class="map-arrow">→</div>
                     <div class="map-col" style="color:#8080a0">{source_display}</div>
                     <div class="map-col"><span class="{badge_class}">{label}</span></div>

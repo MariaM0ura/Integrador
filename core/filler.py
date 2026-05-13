@@ -503,7 +503,8 @@ class MarketplaceFiller:
                 tmp_path = tmp.name
             sanitized_path = sanitize_xlsx_for_openpyxl(tmp_path)
             load_path = sanitized_path or tmp_path
-            wb = load_workbook(load_path, read_only=True)
+            # read_only=True breaks multi-column iteration on some xlsx files (e.g. Shopee)
+            wb = load_workbook(load_path)
             try:
                 ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
                 hr = guess_best_header_row(ws, config["header_row"])
@@ -759,7 +760,8 @@ class MarketplaceFiller:
                     tmp_path = tmp.name
                 sanitized_path = sanitize_xlsx_for_openpyxl(tmp_path)
                 load_path = sanitized_path or tmp_path
-                wb = load_workbook(load_path, read_only=True)
+                # read_only=True breaks multi-column iteration on some xlsx files (e.g. Shopee)
+                wb = load_workbook(load_path)
                 types: dict[int, str] = {}
                 for ws_name in wb.sheetnames:
                     ws = wb[ws_name]

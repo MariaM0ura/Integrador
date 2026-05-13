@@ -35,7 +35,7 @@ import pandas as pd
 
 from core.reader import AmazonSheetReader, AmazonReadResult
 from core.source_reader import MarketplaceSourceReader, SourceReadResult
-from core.mapper import ColumnMapper, MappingResult, FieldMappingDecision
+from core.mapper import ColumnMapper, MappingResult, FieldMappingDecision, _normalize as _mapper_normalize
 from core.filler import (
     MarketplaceFiller,
     FillResult,
@@ -492,10 +492,27 @@ class SellersFlowPipeline:
 
         total_mapped = mapped_before + fase2_new + fase3_new + fase4_new
         result.phase_coverage["total"] = round(total_mapped / total_dest, 3) if total_dest else 0.0
+
+        # Mandatory coverage: uses REQUIRED_FIELDS for the destination marketplace
+        from core.mapper import REQUIRED_FIELDS
+        required_list = REQUIRED_FIELDS.get(marketplace, [])
+        if required_list:
+            dec_by_name = {d.dest_col: d for d in mapping.decisions}
+            mandatory_mapped = sum(
+                1 for col in required_list
+                if dec_by_name.get(col) and dec_by_name[col].source_idx is not None
+            )
+            result.phase_coverage["mandatory_coverage"] = round(
+                mandatory_mapped / len(required_list), 3
+            )
+        else:
+            result.phase_coverage["mandatory_coverage"] = result.phase_coverage["total"]
+
         logger.info(
-            "[Pipeline] Cobertura final: %d/%d (%.0f%%) — F1=%d F2=%d F3=%d F4=%d",
+            "[Pipeline] Cobertura final: %d/%d (%.0f%%) — F1=%d F2=%d F3=%d F4=%d | mandatory=%.0f%%",
             total_mapped, total_dest, result.phase_coverage["total"] * 100,
             mapped_before, fase2_new, fase3_new, fase4_new,
+            result.phase_coverage["mandatory_coverage"] * 100,
         )
         return aug_df, mapping
 
@@ -575,7 +592,8 @@ class SellersFlowPipeline:
             sanitized_path = sanitize_xlsx_for_openpyxl(tmp_path)
             load_path = sanitized_path or tmp_path
 
-            wb = load_workbook(load_path, read_only=True)
+            # read_only=True breaks multi-column iteration on some xlsx files (e.g. Shopee)
+            wb = load_workbook(load_path)
             logger.info("Template '%s' — abas: %s", marketplace, wb.sheetnames)
 
             if marketplace == "Vendor":

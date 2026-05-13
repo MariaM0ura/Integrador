@@ -37,6 +37,8 @@ _EXAMPLE_PATTERNS = [
 
 _REQUIRED_KW = {"obrigatório", "obrigatorio", "required", "requerido", "sim"}
 _OPTIONAL_KW = {"opcional", "optional", "nao obrigatorio", "não obrigatório", "não"}
+# Regex for Shopee/TikTok internal column codes: "ps_product_name|1|0", "et_title_variation_1|0|0"
+_INTERNAL_CODE_RE = re.compile(r"^[a-z0-9_]+(\|[^|]+){1,4}$")
 
 
 # ─── Dataclass de regra por coluna ────────────────────────────────────────────
@@ -137,13 +139,16 @@ class InstructionParser:
         ):
             rows_data[r_idx] = list(row)
 
-        # Determina onde ficam os headers (coluna com mais valores)
-        best_cnt, best_row = 0, header_row
-        for r_idx, row in rows_data.items():
-            cnt = sum(1 for v in row if v and str(v).strip())
-            if cnt > best_cnt:
-                best_cnt, best_row = cnt, r_idx
-        header_data = rows_data.get(best_row, [])
+        # Trust header_row param if it has content; only auto-detect as fallback
+        best_row = header_row
+        header_data = rows_data.get(header_row, [])
+        if sum(1 for v in header_data if v and str(v).strip()) < 3:
+            best_cnt = 0
+            for r_idx, row in rows_data.items():
+                cnt = sum(1 for v in row if v and str(v).strip())
+                if cnt > best_cnt:
+                    best_cnt, best_row = cnt, r_idx
+            header_data = rows_data.get(best_row, [])
 
         # Mapeia col_idx → nome_coluna
         col_names: dict[int, str] = {}
@@ -165,12 +170,17 @@ class InstructionParser:
                 cell_str = str(cell_val).strip()
                 cell_norm = _norm(cell_str)
 
-                if any(kw in cell_norm for kw in _REQUIRED_KW):
+                # "Condicional obrigatório" ≠ truly mandatory — skip it
+                is_conditional = "condicional" in cell_norm
+                if not is_conditional and any(kw in cell_norm for kw in _REQUIRED_KW):
                     rule.obrigatorio = True
                 elif any(kw in cell_norm for kw in _OPTIONAL_KW):
                     rule.obrigatorio = False
 
-                if len(cell_str) > 15 and cell_norm not in _REQUIRED_KW | _OPTIONAL_KW:
+                # Skip internal codes (e.g. "ps_product_name|1|0") and opaque hashes
+                is_code = _INTERNAL_CODE_RE.match(cell_str.lower().strip())
+                is_hash = len(cell_str) <= 40 and " " not in cell_str and cell_str.isalnum()
+                if len(cell_str) > 15 and cell_norm not in _REQUIRED_KW | _OPTIONAL_KW and not is_code and not is_hash:
                     if not rule.regra:
                         rule.regra = cell_str[:500]
                     vals = _extract_accepted_values(cell_str)
@@ -391,6 +401,7 @@ def _load_wb(template_bytes: bytes):
         tmp_path = tmp.name
 
     san_path = sanitize_xlsx_for_openpyxl(tmp_path)
+    # read_only=True breaks multi-column iteration on some xlsx files (e.g. Shopee)
     return openpyxl.load_workbook(
-        san_path or tmp_path, read_only=True, data_only=True, keep_vba=True
+        san_path or tmp_path, data_only=True, keep_vba=True
     )
