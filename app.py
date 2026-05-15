@@ -75,6 +75,18 @@ def confidence_icon(score: float) -> str:
             return icon
     return "⚪"
 
+
+def _values_from_decision(df: pd.DataFrame, decision: FieldMappingDecision) -> list:
+    """Valores da coluna origem; tolera source_idx desatualizado após fases 2–4."""
+    n = len(df)
+    if not decision.source_col:
+        return [""] * n
+    if decision.source_col in df.columns:
+        return df[decision.source_col].tolist()
+    if decision.source_idx is not None and 0 <= decision.source_idx < len(df.columns):
+        return df.iloc[:, decision.source_idx].tolist()
+    return [""] * n
+
 # ─── Validação de template ────────────────────────────────────────────────────
 
 _TEMPLATE_SIGNATURES: dict = {
@@ -881,11 +893,9 @@ else:
                     # com nomes duplicados (ex: "Sku Id" aparece 2x no Temu)
                     output_preview_indexed: dict[int, tuple[str, list]] = {}
                     for d in mr.decisions:
-                        if d.source_idx is not None:
-                            vals = df_amazon.iloc[:, d.source_idx].tolist() if d.source_col else [""] * len(df_amazon)
-                        else:
-                            vals = [""] * len(df_amazon)
-                        output_preview_indexed[id(d)] = (d.dest_col, vals)
+                        output_preview_indexed[id(d)] = (
+                            d.dest_col, _values_from_decision(df_amazon, d),
+                        )
                     # Monta df só com colunas mapeadas (source_col não-None)
                     mapped_decisions = [d for d in mr.decisions if d.source_col]
                     output_preview = {}
@@ -897,7 +907,7 @@ else:
                             label = f"{d.dest_col} ({seen_dest[d.dest_col]})"
                         else:
                             seen_dest[label] = 1
-                        output_preview[label] = df_amazon.iloc[:, d.source_idx].tolist()
+                        output_preview[label] = _values_from_decision(df_amazon, d)
                     df_out = pd.DataFrame(output_preview).head(20)
                     st.caption(f"{len(df_out)} linhas · {len(output_preview)} colunas mapeadas")
                     st.dataframe(df_out, use_container_width=True, height=350)

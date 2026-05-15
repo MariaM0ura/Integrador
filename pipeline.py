@@ -279,6 +279,11 @@ class SellersFlowPipeline:
             amazon_df = pd.DataFrame(enriched_rows)
             logger.info("[Pipeline] Enriquecimento concluído para %d produtos.", len(enriched_rows))
 
+        # Mantém read_result.df alinhado ao DataFrame usado no fill/preview
+        # (colunas virtuais __rf__/__ai__ das fases 2–4 e enriquecimento).
+        if result.read_result is not None:
+            result.read_result.df = amazon_df
+
         # ── Etapa 6: Preenchimento ────────────────────────────────────────
         logger.info("[Pipeline] Preenchendo template...")
         fill_result = self._filler.fill(
