@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 #   skip_row_if    — lista de strings: pula linha se qualquer célula contiver
 
 SOURCE_CONFIG: dict[str, dict] = {
+    "BI": {
+        # BI (planilha do cliente) como origem genérica
+        # Default conservador: primeira aba, cabeçalho na 1a linha.
+        "sheet_index": 0,
+        "header_row": 1,
+        "data_start": 2,
+    },
     "Mercado Livre": {
         # Terceira aba do workbook (índice 2) — nome varia por categoria
         "sheet_index": 2,

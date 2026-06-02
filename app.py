@@ -49,7 +49,7 @@ logging.basicConfig(
 # ─── Constantes ───────────────────────────────────────────────────────────────
 
 MARKETPLACES = ["Selecione o Marketplace", "Amazon", "Magalu", "Mercado Livre", "Shopee", "Temu", "Vendor", "Walmart"]
-SOURCE_MARKETPLACES = ["Selecione o Marketplace", "Amazon", "Magalu", "Mercado Livre", "Shopee", "Temu", "Vendor", "Walmart"]
+SOURCE_MARKETPLACES = ["Selecione o Marketplace", "Amazon", "BI", "Magalu", "Mercado Livre", "Shopee", "Temu", "Vendor", "Walmart"]
 
 STRATEGY_LABELS = {
     "fixed+synonym":   ("🟢 Fixo + Sinônimo", "green"),
@@ -523,16 +523,19 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("**🔄 Conversão**")
-    col_src, col_arr, col_dst = st.columns([5, 1, 5])
+    col_dst, col_arr, col_src = st.columns([5, 1, 5])
     with col_src:
         source_marketplace = st.selectbox(
             "Origem", SOURCE_MARKETPLACES, key="source_mp",
             help="Marketplace de onde vêm os dados"
         )
     with col_arr:
-        st.markdown("<div style='text-align:center;padding-top:28px;font-size:1.2rem'>→</div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center;padding-top:28px;font-size:1.2rem'>←</div>", unsafe_allow_html=True)
     with col_dst:
-        dest_options = [m for m in MARKETPLACES if m != "Selecione o Marketplace" and m != source_marketplace]
+        dest_options = [
+            m for m in MARKETPLACES
+            if m != "Selecione o Marketplace" and m != source_marketplace
+        ]
         marketplace = st.selectbox(
             "Destino", ["Selecione o Marketplace"] + dest_options, key="dest_mp",
             help="Marketplace para onde os dados serão convertidos"
@@ -540,12 +543,12 @@ with st.sidebar:
 
     st.markdown("**📤 Arquivos**")
     source_label = f"Planilha {source_marketplace}"
-    amazon_file = st.file_uploader(
-        source_label, type=["xlsx", "xlsm", "xls"], key="amazon_upload"
-    )
     dest_file = st.file_uploader(
         f"Template {marketplace}" if marketplace != "Selecione o Marketplace" else "Template destino",
         type=["xlsx", "xlsm", "xls"], key="dest_upload"
+    )
+    amazon_file = st.file_uploader(
+        source_label, type=["xlsx", "xlsm", "xls"], key="amazon_upload"
     )
 
     # ── Validação de compatibilidade de template ──────────────────────────

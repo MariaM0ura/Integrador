@@ -269,6 +269,41 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
 # independente de qual marketplace originou os dados.
 
 SOURCE_MAPPINGS: dict[str, dict[str, str]] = {
+    "BI": {
+        # Identificação
+        "sku": "sku",
+        "codigo sku": "sku",
+        "codigo_sku": "sku",
+        "sku seller": "sku",
+        "ean": "id_produto",
+        "gtin": "id_produto",
+        "ncm": "ncm",
+        # Conteúdo
+        "titulo": "nome_produto",
+        "titulo produto": "nome_produto",
+        "nome produto": "nome_produto",
+        "descricao": "descricao",
+        "descricao produto": "descricao",
+        "marca": "marca",
+        # Comercial
+        "preco": "preco",
+        "preco venda": "preco",
+        "preco de venda": "preco",
+        "valor": "preco",
+        "estoque": "quantidade",
+        "quantidade": "quantidade",
+        # Atributos
+        "cor": "cor",
+        "tamanho": "tamanho",
+        "sabor": "sabor",
+        "material": "material",
+        # Dimensões e peso
+        "peso": "peso_pacote",
+        "peso pacote": "peso_pacote",
+        "altura": "altura_pacote",
+        "largura": "largura_pacote",
+        "comprimento": "comprimento_pacote",
+    },
     "Amazon": {
         # EN
         "item name": "nome_produto",
