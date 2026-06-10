@@ -217,6 +217,27 @@ st.markdown("""
     }
     [data-testid="stSidebar"] .block-container { padding-top: 1.2rem; }
 
+    /* ── Sidebar toggle — visível mesmo com header escondido ── */
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapseButton"],
+    button[data-testid="collapsedControl"],
+    button[data-testid="stSidebarCollapseButton"] {
+        visibility: visible !important;
+        display: flex !important;
+        opacity: 1 !important;
+        z-index: 9999 !important;
+        color: var(--text-sec) !important;
+        background: var(--bg-elevated) !important;
+        border-radius: 0 6px 6px 0 !important;
+        border: 1px solid var(--border-def) !important;
+        border-left: none !important;
+    }
+    [data-testid="collapsedControl"]:hover,
+    [data-testid="stSidebarCollapseButton"]:hover {
+        color: var(--text-acc) !important;
+        border-color: var(--sf-blue) !important;
+    }
+
     /* ── Logo ── */
     .sf-logo-wrap {
         display: flex; align-items: center; gap: 10px;

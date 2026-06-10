@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import io
 import logging
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_accents(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
 
 # ─── Configuração por versão de template ─────────────────────────────────────
 
@@ -111,12 +119,23 @@ class AmazonSheetReader:
                 return i
         return None
 
+    # Valores que identificam linhas de exemplo/metadados entre o cabeçalho e os dados reais.
+    # Checa os primeiros N valores não-nulos da linha (qualquer match → linha pulada).
+    _EXAMPLE_MARKERS: frozenset = frozenset({
+        "abc123", "example", "exemplo", "sample",
+        "obrigatorio", "opcional", "required", "optional",
+        "conditionally required", "condicionalmente obrigatorio",
+        "text", "integer", "decimal", "boolean",
+    })
+
     @staticmethod
     def _find_data_start(df_raw: pd.DataFrame, header_idx: int, max_scan: int = 8) -> int:
         """
         Encontra a primeira linha de dados reais após o cabeçalho.
-        Pula linhas de IDs internos (contêm # ou [) e linha de exemplo padrão.
+        Pula linhas de IDs internos (contêm # ou [), linhas de metadados/tipos
+        e linhas de exemplo padrão do template Amazon.
         """
+        example_markers = AmazonSheetReader._EXAMPLE_MARKERS
         for i in range(header_idx + 1, header_idx + 1 + max_scan):
             if i >= len(df_raw):
                 break
@@ -130,8 +149,9 @@ class AmazonSheetReader:
             # Pula metadados longos
             if len(first) > 200 or any(p in first.lower() for p in SKIP_PATTERNS):
                 continue
-            # Pula linha de exemplo padrão da Amazon
-            if first.upper() in ("ABC123", "EXAMPLE", "EXEMPLO"):
+            # Pula linhas de exemplo/metadados checando os primeiros 8 valores não-nulos
+            row_vals_norm = [_strip_accents(str(v).strip().lower()) for v in row.values[:8]]
+            if any(v in example_markers for v in row_vals_norm):
                 continue
             return i
         return header_idx + 1  # fallback

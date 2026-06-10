@@ -805,6 +805,14 @@ class MarketplaceFiller:
         kwargs = {}
         if conv:
             kwargs = {"from_unit": conv[0], "to_unit": conv[1]}
+        elif field_type in self._TWO_DECIMAL_FIELDS:
+            # Sem conversão de unidade explícita configurada: apenas parse numérico,
+            # sem aplicar os defaults lb→kg / in→cm do normalizer.
+            try:
+                v = float(str(value).strip().replace(",", "."))
+                return round(v, 2)
+            except (ValueError, TypeError):
+                return value
         result = self._normalizer.normalize_field(field_type, value, **kwargs)
         normalized = result.normalized if result.normalized != "" else None
         if normalized is not None and field_type in self._TWO_DECIMAL_FIELDS:
